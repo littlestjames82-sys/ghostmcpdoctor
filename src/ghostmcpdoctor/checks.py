@@ -6,6 +6,7 @@ argument values other than referenced file paths, or file contents.
 """
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -18,6 +19,7 @@ _SHELLS = {"sh", "bash", "zsh", "cmd", "cmd.exe", "powershell", "powershell.exe"
 
 def finding(server: str, config_path: str, code: str, severity: str,
             detail: str, path: str = "") -> dict:
+    """Build one finding dict; ``stale`` is derived from the issue code."""
     return {
         "server": server,
         "config_path": config_path,
@@ -30,17 +32,35 @@ def finding(server: str, config_path: str, code: str, severity: str,
 
 
 def _command_exists(command_raw: str) -> bool:
+    """True when a path-like command exists, or a bare name is on ``PATH``."""
     if not command_raw:
         return False
-    if "/" in command_raw or "\\" in command_raw:
-        p = Path(command_raw).expanduser()
-        return p.exists()
-    return shutil.which(command_raw) is not None
+    # Expand $HOME / ${HOME} (and "~" below): a command spelled
+    # "$HOME/bin/tool" was checked as a literal "$HOME/..." path and
+    # always reported MISSING-COMMAND, even when the file exists.
+    expanded = os.path.expandvars(command_raw)
+    if ("/" in expanded or "\\" in expanded) \
+            and Path(expanded).expanduser().exists():
+        return True  # also covers real paths containing spaces
+    tokens = expanded.strip().strip("\"'").split()
+    if not tokens:
+        return False
+    if len(tokens) > 1:
+        # A command string embedding its arguments ("python3 -m x",
+        # "bash -c ..."): the program whose existence matters is the
+        # first token; checking the whole string always missed.
+        return _command_exists(tokens[0])
+    if "/" in expanded or "\\" in expanded:
+        return Path(expanded).expanduser().exists()
+    return shutil.which(expanded) is not None
 
 
 def _resolve(ref: str, config_path: str, cwd: str, home: Path) -> Path:
+    """Resolve a referenced path against the entry's ``cwd`` or config dir."""
     expanded = ref
-    if expanded.startswith("$HOME"):
+    if expanded.startswith("${HOME}"):
+        expanded = str(home) + expanded[len("${HOME}"):]
+    elif expanded.startswith("$HOME"):
         expanded = str(home) + expanded[len("$HOME"):]
     p = Path(expanded).expanduser()
     if not p.is_absolute():
@@ -52,6 +72,15 @@ def _resolve(ref: str, config_path: str, cwd: str, home: Path) -> Path:
 
 
 def check_servers(scans: list[ConfigScan], home: Path) -> list[dict]:
+    """Run every check over the scanned configs and return sorted findings.
+
+    Emits ``PARSE-ERROR`` for unparseable configs, ``DUPLICATE`` once per
+    extra definition of a server name, and the per-server checks
+    (``EMPTY-SERVER``, ``DISABLED``, ``SHELL-WRAPPER``,
+    ``MISSING-COMMAND``, ``MISSING-FILE``, ``BROAD-FILESYSTEM``,
+    ``BROAD-ENV``). Input records are already redacted, so no detail
+    string built here can carry an env value or file content.
+    """
     findings: list[dict] = []
     all_servers: list[Server] = []
     for scan in scans:
@@ -98,14 +127,17 @@ def check_servers(scans: list[ConfigScan], home: Path) -> list[dict]:
                 findings.append(finding(
                     srv.name, cp, "MISSING-COMMAND", "error",
                     f"command not found: {srv.command_basename}"))
+        # Resolution uses the internal raw cwd even when the
+        # reported cwd was redacted by the scanner.
+        eff_cwd = getattr(srv, "cwd_raw", "") \
+            or (srv.cwd if srv.cwd != "[redacted]" else "")
         seen_refs = set()
         for ref in srv.referenced_paths:
             if ref in seen_refs:
                 continue
             seen_refs.add(ref)
-            resolved = _resolve(ref, cp, srv.cwd if ref != srv.cwd else "", home)
-            if ref == srv.cwd and srv.cwd:
-                resolved = _resolve(ref, cp, "", home)
+            resolved = _resolve(ref, cp, "" if ref == eff_cwd else eff_cwd,
+                                home)
             if not resolved.exists():
                 # Bare broad / wildcard tokens are permission findings,
                 # not file checks.

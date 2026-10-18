@@ -34,6 +34,12 @@ def exit_code_for(findings, configs_scanned, fallback=None) -> int:
 
 
 def build_report(scans, home, missing_explicit=None) -> dict:
+    """Assemble the report dict from config scans.
+
+    Runs the checks, inventories the (already redacted) server records,
+    and computes the summary counts and exit code. The dict returned
+    here is exactly what is written to ``mcpdoctor-report.json``.
+    """
     findings = check_servers(scans, home)
     servers = [srv.inventory() for scan in scans for srv in scan.servers]
     by_severity = Counter(f["severity"] for f in findings)
@@ -73,6 +79,7 @@ def build_report(scans, home, missing_explicit=None) -> dict:
 
 
 def render_markdown(report: dict) -> str:
+    """Render a report dict as the human-readable ``MCPDOCTOR.md`` text."""
     s = report.get("summary", {})
     lines = [
         "# GhostMCP Doctor report",
@@ -125,6 +132,12 @@ def render_markdown(report: dict) -> str:
 
 
 def write_reports(report: dict, out_dir) -> tuple[Path, Path]:
+    """Write ``mcpdoctor-report.json`` and ``MCPDOCTOR.md`` into ``out_dir``.
+
+    Creates the directory if needed and returns ``(json_path, md_path)``.
+    This is the only place Doctor writes files, and it never writes
+    into or next to a scanned config unless the caller chose that dir.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     json_path = out / REPORT_JSON

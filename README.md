@@ -28,6 +28,29 @@ Agent Seatbelt governs what an agent *does*, GhostExposure governs
 what sensitive *code* is in or out of a bundle, and GhostMCP Doctor
 governs what *tools* the agent clients on this machine are wired to.
 
+## At a glance
+
+Doctor **does**:
+
+- Read MCP config files you name, or the default local locations
+  listed under Commands, and inventory every server defined in them.
+- Report duplicate names, missing commands and files, empty or
+  disabled entries, broad filesystem or env grants, shell wrappers,
+  and unparseable configs, as findings of server name + path + issue.
+- Write a redacted `mcpdoctor-report.json` + `MCPDOCTOR.md` pair you
+  can share, and give CI a usable exit code (0, 1, or 2, below).
+
+Doctor **does not**:
+
+- Edit, fix, deduplicate, or delete any config entry. There is no
+  `--fix`, by design. Every fix is a manual edit you make yourself.
+- Start, ping, install, or uninstall any MCP server, or make any
+  network call. URL servers are parsed, never contacted.
+- Judge whether a server is safe or trustworthy. It reports breadth
+  and staleness as evidence, not as a verdict.
+- Show you a secret. Env values are discarded at parse time; see
+  the secret rule below.
+
 ## The secret rule (non-negotiable)
 
 Env blocks in MCP configs carry API keys and tokens, so Doctor treats
@@ -78,10 +101,34 @@ ghostmcpdoctor scan
 # Full redacted report as JSON on stdout
 ghostmcpdoctor scan ~/.claude.json --json
 
+# Print-only scan for scripts and CI: no report files are written
+ghostmcpdoctor scan ~/.claude.json --no-report
+
 # Re-render the Markdown + JSON reports from a previous scan,
 # without re-scanning (safe to share: it is already redacted)
 ghostmcpdoctor report mcpdoctor-report.json --out-dir ./share
 ```
+
+What a scan prints looks like this: a one-line summary (counts and
+the exit code), one line per finding, then three standing `note:`
+lines about the read-only and redaction guarantees:
+
+```text
+ghostmcpdoctor scan: <n> server(s) in <n> config(s), <n> finding(s) (exit <code>)
+  [<severity>] <server name> - <config path> - <ISSUE-CODE>: <plain reason>
+```
+
+(The exact, verified output for the bundled samples is in
+[`examples/WALKTHROUGH.md`](examples/WALKTHROUGH.md).)
+
+Two quickstart gotchas:
+
+- `ghostmcpdoctor scan` with no paths only scans default locations
+  that actually exist. If none exist, it exits 2 rather than
+  reporting a false clean pass.
+- `scan` writes its two report files into the current directory by
+  default. Pass `--out-dir <dir>` to put them somewhere deliberate,
+  or `--no-report` to write nothing.
 
 A worked walkthrough with sample configs lives in
 [`examples/`](examples/README.md).
@@ -91,7 +138,7 @@ A worked walkthrough with sample configs lives in
 | Command | What it does |
 |---|---|
 | `ghostmcpdoctor scan [paths ...] [--config <path> ...] [--home <dir>] [--project <dir>] [--out-dir <dir>] [--json] [--no-report]` | Scan config files or directories (read-only). Explicit paths win. A directory is searched for the known filenames (`mcp.json`, `.mcp.json`, `.claude.json`, `.cursor/mcp.json`, `.vscode/mcp.json`). With no paths, the default local locations are used where they exist. Writes `mcpdoctor-report.json` + `MCPDOCTOR.md` to the output directory (default: current directory, never next to a scanned config by default) and prints a short summary: counts plus one `name - path - issue` line per finding. `--json` prints the full report to stdout instead. `--no-report` writes no files. |
-| `ghostmcpdoctor report <mcpdoctor-report.json> [--out-dir <dir>] [--markdown]` | Re-render Markdown + JSON from a previous scan's JSON report without re-scanning. |
+| `ghostmcpdoctor report <mcpdoctor-report.json> [--out-dir <dir>] [--markdown]` | Re-render Markdown + JSON from a previous scan's JSON report without re-scanning. Default output directory is the directory holding the input report. `--markdown` also prints the Markdown report to stdout. The exit code is recomputed from the stored findings, not copied from the stored value. |
 
 Both container shapes are understood: `mcpServers` (Claude Code,
 Cursor, generic) and `servers` (VS Code), at the top level and, for
@@ -121,6 +168,28 @@ only): `~/.claude.json`, `~/.claude/settings.json`,
 `MISSING-COMMAND`, `MISSING-FILE`, and `DISABLED` are also counted
 as **stale evidence** in the report summary.
 
+### What to do with a finding
+
+Doctor never fixes anything, so each finding ends in a manual edit
+you make in the named config file, or a deliberate decision to keep
+the entry as it is:
+
+| Code | Suggested manual follow-up |
+|---|---|
+| `DUPLICATE` | Open both definitions, keep the one the client should use, and remove or rename the other. Check for drift before deleting: the two copies may no longer be identical. |
+| `MISSING-COMMAND` | Reinstall the tool, fix the command path, or remove the entry. For a bare command name, first check whether the client app sees a different `PATH` than your shell (see Limits). |
+| `MISSING-FILE` | Restore the missing script or directory, correct the path (relative paths resolve against the config's directory or the entry's `cwd`), or remove the entry. |
+| `EMPTY-SERVER` | Give the entry a `command` or a `url`, or remove it. As written, no client can start it. |
+| `DISABLED` | Re-enable it if it is still wanted, or remove it so the config only lists live wiring. |
+| `BROAD-FILESYSTEM` | Narrow the granted path to the specific project directory the server actually needs. |
+| `BROAD-ENV` | Replace the `*` wildcard with the specific key names or allowed tools the server needs. |
+| `SHELL-WRAPPER` | Point `command` at the real program directly where you can, so the entry shows what will actually run. |
+| `PARSE-ERROR` | Fix the JSON syntax, or make the server container an object (`"mcpServers": { ... }`), then re-scan. The rest of your configs were still scanned. |
+
+After editing, re-run the same scan. A clean re-scan (exit 0, or
+only info findings you have decided to keep) is the confirmation
+that the fix landed.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -128,6 +197,27 @@ as **stale evidence** in the report summary.
 | 0 | Scanned, and no findings above info level. A config whose only findings are info (for example one disabled server) exits 0. |
 | 1 | Warnings or errors found. A `report` re-render returns the code recomputed from the stored findings under this same rule (not the stored value verbatim), so reports written by older builds render with the corrected code. |
 | 2 | Could not scan: no configs found, or an explicitly named config path does not exist. A scan that found nothing to scan never exits 0. |
+
+## Troubleshooting
+
+- **Exit 2, "no MCP config files found".** No default location
+  exists on this machine and no path was supplied. Name the config
+  files or directories explicitly, or use `--home` / `--project` to
+  re-root the defaults.
+- **Exit 2, "config path not found".** A path you named explicitly
+  does not exist. A typo fails the scan on purpose: silently
+  skipping a file you asked for would look like a clean result.
+- **A config you expected is missing from the report.** Directory
+  scans only pick up the known filenames listed under Commands, so
+  name an unusually named file directly. A file that parses but has
+  no `mcpServers` or `servers` container is listed with 0 servers.
+- **`MISSING-COMMAND` for a tool you know is installed.** The
+  client's `PATH` may differ from the scanning shell's `PATH`; the
+  finding is evidence to check, not proof (see Limits).
+- **You need to share a result.** Share the report pair, not your
+  config files. The reports are redacted by construction; the raw
+  configs contain the env values Doctor exists to keep out of
+  scrollback and screenshots.
 
 ## Reports
 
@@ -150,10 +240,15 @@ as **stale evidence** in the report summary.
 - Doctor reports breadth and staleness as evidence. It does not
   judge whether a server is *safe* or trustworthy beyond those
   mechanical permission checks.
-- Plain JSON only in v0.1 (a UTF-8 BOM at the start of a file is
-  tolerated, as editor-written configs often carry one). TOML/YAML
-  configs, JSONC comment stripping, and remote registries are named
-  v0.2 candidates, not silent gaps. Unknown shapes degrade to "no
+- Plain JSON and JSONC in v0.1 (a UTF-8 BOM at the start of a file is
+  tolerated, as editor-written configs often carry one). JSONC means
+  `//` and `/* */` comments plus trailing commas, as written by VS
+  Code and Cursor: strict JSON is tried first, comments and trailing
+  commas outside strings are stripped only as a fallback, and a
+  commented-out server is not inventoried. Comment text is discarded
+  at parse time, so a secret pasted into a comment never reaches a
+  report. TOML/YAML configs and remote registries remain out of
+  scope, not silent gaps. Unknown shapes degrade to "no
   servers found in this file" or a `PARSE-ERROR`, never to a crash
   or a guessed parse. A server container that is present but not an
   object is a `PARSE-ERROR`, and the rest of the file (and the other
