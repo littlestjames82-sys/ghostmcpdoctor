@@ -1,5 +1,6 @@
 # GhostMCP Doctor
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/littlestjames82-sys/ghostmcpdoctor/actions/workflows/ci.yml/badge.svg)](https://github.com/littlestjames82-sys/ghostmcpdoctor/actions/workflows/ci.yml/actions)
 
 **What tools are your agent clients wired to, and is any of that wiring stale, duplicated, or over-broad?**
 
